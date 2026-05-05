@@ -1,0 +1,209 @@
+---
+title: "NLP Final Project"
+author: "Etienne Arnoult"
+date: "`r Sys.Date()`"
+output: html_document
+---
+# Load Necessary Packages
+```{r}
+library(dplyr)
+library(tidyverse)
+library(tidyr)
+library(textstem)
+library(ggplot2)
+library(lmtest)
+```
+
+# Read in Trumps tweet data and polling data and extracting what I need
+```{r}
+TrumpTweetsFull <- read.csv("C:/Users/Etienne Arnoult/Downloads/trump_presidency_tweets_2017_2020.csv")
+TrumpTweetsRaw <- TrumpTweetsFull %>%
+  select(date, lower_text, is_rt) # dataset has text already put into lowercase
+#str(TrumpTweetsRaw)
+
+PollsFull <- read.csv("C:/Users/Etienne Arnoult/Downloads/historical_net_approval_rate_first_term.csv")
+PollsRaw <- PollsFull %>%
+  select("days", "Donald.Trump")
+#str(PollsRaw)
+```
+
+
+# Trump Tweet Cleaning Genie
+```{r}
+TrumpTweetyCleanyGenie <- function(df) {
+  
+  # 1. Filter out retweets
+  df <- df %>% filter(is_rt != "YES")
+  
+  # 2. Split into words
+  df$lower_text <- strsplit(df$lower_text, "\\s+")
+  
+  # 3. Unnest to one word per row (date stays aligned)
+  df <- df %>% unnest(lower_text)
+  
+  # 4. Remove @mentions, hashtags, and t.co links
+  df <- df[!grepl("@", df$lower_text, fixed = TRUE), ]
+  df <- df[!grepl("#", df$lower_text, fixed = TRUE), ]
+  df <- df[!grepl("t.co", df$lower_text, fixed = TRUE), ]
+  
+  # 5. Load stopword + replacement lists and capture object names
+  stops_obj <- load(url("https://github.com/Reilly-ConceptsCognitionLab/reillylab_publicdata/blob/main/Temple_stops25.rda?raw=true"))
+  repl_obj  <- load(url("https://github.com/Reilly-ConceptsCognitionLab/reillylab_publicdata/blob/main/replacements_25.rda?raw=true"))
+  
+  Temple_stops25     <- get(stops_obj[1])
+  replacement_lookup <- get(repl_obj[1])
+  
+  # 6. Apply contraction replacement BEFORE removing punctuation
+  df$lower_text[df$lower_text %in% names(replacement_lookup)] <- 
+    replacement_lookup[df$lower_text[df$lower_text %in% names(replacement_lookup)]]
+  
+  # 7. NOW remove digits and punctuation
+  df$lower_text <- gsub("\\d", " ", df$lower_text)
+  df$lower_text <- gsub("[^A-Za-z ]", " ", df$lower_text)
+  
+  # 8. Trim whitespace created by cleaning
+  df$lower_text <- trimws(df$lower_text)
+  df <- df[df$lower_text != "", ]
+  
+  # 9. Lemmatize
+  df$lemma <- textstem::lemmatize_words(df$lower_text)
+  
+  # 10. Remove stopwords
+  Stops <- as.character(Temple_stops25$word)
+  df <- df[!df$lemma %in% Stops, ]
+  
+  # 11. Remove blank rows again after lemmatization
+  df$lemma <- trimws(df$lemma)
+  df <- df[df$lemma != "", ]
+  
+  # 12. Return clean data frame with date + lemma
+  df %>% select(date, lemma)
+}
+
+
+
+TT_clean <- TrumpTweetyCleanyGenie(TrumpTweetsRaw)
+```
+
+# Loads "Lookup Database" from Github
+```{r}
+# Load BIG lookup database
+#Your lookup database contains values or 'metadata' for many words.  I have combined many published lexical databases into a single lexical lookup database that you can use for sentiment, etc.  Let's load that in from Github and inspect it
+
+load(url("https://github.com/Reilly-ConceptsCognitionLab/reillylab_publicdata/blob/main/lookup_Jul25.rda?raw=true"))
+lookup_db <- lookup_Jul25
+colnames(lookup_db)
+str(lookup_db)
+```
+
+# Look up variables
+```{r}
+lookup_small <- lookup_db %>% select(1, 7, 25) #uses position to call arguments
+str(lookup_small)
+```
+
+# Join lookup data to target text by row
+```{r}
+df_prep <- TT_clean %>% 
+  dplyr::left_join(lookup_small, by = c("lemma" = "word")) 
+print(df_prep)
+```
+
+# average sentiment per day
+```{r}
+df_prep$date <- TT_clean$date #left join changes the dates for some reason, but the other columns are intact, so this just replaces the changed dates with the originals
+
+
+Sent_Per_Day <- df_prep %>% # average sentiment per day
+  group_by(date) %>%
+  summarize(
+    AVG_arousal = mean(emo_arousal_b24_rescale, na.rm = TRUE),
+    AVG_valence = mean(emo_valence_b24_rescale, na.rm = TRUE)
+  ) %>%
+  arrange(date)
+```
+
+# get precise dates of daily polls
+```{r}
+PollsRaw <- PollsRaw %>%
+  mutate(
+    date = as.Date("2017-01-20") + (days - 1)
+  )
+
+Sent_Per_Day$date <- as.Date(Sent_Per_Day$date)
+```
+
+# COMBINATION
+```{r}
+COMBINATION <- Sent_Per_Day %>%
+  full_join(PollsRaw, by = "date")
+
+Merge <- COMBINATION %>% # correct discrepancy of trump getting kicked off twitter and end of first term
+  tidyr::drop_na()
+
+```
+
+#granger causality
+```{r}
+# does valence cause polling changes
+Val_cause_poll <- lmtest::grangertest(Merge$AVG_valence, Merge$Donald.Trump, order = 1)
+
+# does arousal cause polling changes
+Ar_cause_poll <- lmtest::grangertest(Merge$AVG_arousal, Merge$Donald.Trump, order = 1)
+
+Val_cause_Ar <- lmtest::grangertest(Merge$AVG_valence, Merge$AVG_arousal, order = 1)
+
+Val_cause_poll
+Ar_cause_poll
+Val_cause_Ar
+```
+# FML lets check correlations
+```{r}
+cor(Merge$Donald.Trump, Merge$AVG_arousal, use = "complete.obs")
+cor(Merge$Donald.Trump, Merge$AVG_valence, use = "complete.obs")
+```
+# plot approval and valence correlation
+```{r}
+corr_value_val <- round(cor(Merge$Donald.Trump, Merge$AVG_valence, use = "complete.obs"), 3)
+
+ggplot(Merge, aes(x = AVG_valence, y = Donald.Trump)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue", size = 1) +
+  annotate("text", x = min(Merge$AVG_valence), 
+           y = max(Merge$Donald.Trump),
+           label = paste("Correlation =", corr_value_val),
+           hjust = 0, vjust = 1, size = 5) +
+  labs(
+    title = "Correlation Between Valence and Polling",
+    x = "Average Tweet Valence",
+    y = "Donald Trump Approval"
+  ) +
+  theme_minimal()
+
+```
+# plot approval rating and arousal correlation
+```{r}
+corr_value_AR <- round(cor(Merge$Donald.Trump, Merge$AVG_arousal, use = "complete.obs"), 3)
+
+ggplot(Merge, aes(x = AVG_arousal, y = Donald.Trump)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue", size = 1) +
+  annotate("text", x = min(Merge$AVG_arousal), 
+           y = max(Merge$Donald.Trump),
+           label = paste("Correlation =", corr_value_AR),
+           hjust = 0, vjust = 1, size = 5) +
+  labs(
+    title = "Correlation Between Valence and Polling",
+    x = "Average Tweet Arousal",
+    y = "Donald Trump Approval"
+  ) +
+  theme_minimal()
+```
+# saving database links and whatnot
+```{r}
+http://varianceexplained.org/r/trump-tweets/
+https://www.presidency.ucsb.edu/statistics/data/donald-j-trump-public-approval
+https://github.com/lorenzo-ruffino/approval_rate_usa_president/blob/main/README.md
+https://github.com/fivethirtyeight/data/tree/master/trump-approval-ratings
+```
+
