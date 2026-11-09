@@ -1,1 +1,1 @@
-This is an old class assignment.  Please read the uploaded paper for the results and analysis
+This is an old class assignment.  Please read the uploaded paper for the results and analysis.  This was a simple analysis using NLP in R to evaluate the impact of Trumps use of emotionally valent and arousing language on his polls from the 2016 election. 
